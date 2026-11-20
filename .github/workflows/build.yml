@@ -1,0 +1,379 @@
+name: Build SM-A146P KernelSU-Next + SUSFS (Binary L 6.6.127)
+
+permissions:
+  contents: write
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Publish GitHub Release with Odin tars & AnyKernel3.zip"
+        type: boolean
+        default: true
+      release_tag:
+        description: "Custom release tag (leave empty for auto tag)"
+        type: string
+        default: ""
+      prerelease:
+        description: "Mark GitHub Release as pre-release"
+        type: boolean
+        default: false
+
+env:
+  DEVICE_MODEL: SM-A146P
+  BUILD_NUMBER: A146PXXULEZJ3
+  TOOLCHAIN_REPO: WildKernels/Samsung_Kernels
+  TOOLCHAIN_BRANCH: SM-A146P-Oneui7-Mediatek
+  GDRIVE_U1_OPENSOURCE_ID: 1pz7OJUrY7A-E37x2r5pmr0EnHimZcSdL
+  GDRIVE_A146P_DTS_ID: 1k4yr3-pZgHL7yYxeTm37uL1O4eo0GDOF
+  GDRIVE_BOOT_LZ4_ID: 14H5Lf85rlz34U9jCo97EztriXHMtH2a3
+  GDRIVE_VBMETA_LZ4_ID: 1h8k6fshuD16CGugB15Jgb0YN0HspeRkq
+
+jobs:
+  build:
+    name: "SM-A146P Binary L (A146PXXULEZJ3) 6.6.127"
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      - name: Setup swap space (8 GB)
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 8
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python-is-python3 \
+            lz4 \
+            zip \
+            unzip \
+            perl \
+            cpio \
+            file \
+            patch \
+            curl \
+            git \
+            xz-utils
+          df -h
+
+      - name: Prepare workspace paths
+        run: |
+          WORK_DIR="${RUNNER_TEMP}/kernel_work"
+          OUT_DIR="${GITHUB_WORKSPACE}/release_out"
+          mkdir -p "$WORK_DIR/stock" "$OUT_DIR"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
+          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
+
+      - name: Clone toolchain base from WildKernels/Samsung_Kernels
+        run: |
+          set -euo pipefail
+          git clone --depth 1 -b "$TOOLCHAIN_BRANCH" --single-branch \
+            "https://github.com/${TOOLCHAIN_REPO}.git" "$WORK_DIR/src"
+
+          echo "Extracting compressed toolchain archives (*.tar.xz)..."
+          cd "$WORK_DIR/src"
+          find . -type f -name '*.tar.xz' -print0 | while IFS= read -r -d '' f; do
+            echo "  Extracting $f"
+            tar -xf "$f"
+            rm -f "$f"
+          done
+
+          # Preserve WildKernels QUICK_BUILD=1 build.sh before overlaying Binary L
+          cp -f "$WORK_DIR/src/kernel/kernel_device_modules-6.6/build.sh" "$WORK_DIR/quick_build.sh"
+          df -h
+
+      - name: Download Binary L 6.6.127 sources & stock images from Google Drive
+        run: |
+          set -euo pipefail
+
+          gdrive_dl() {
+            local id="$1"
+            local out="$2"
+            local url="https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t"
+            echo "Downloading $(basename "$out") (id=${id})..."
+            curl -fSL --retry 5 --retry-delay 5 --retry-all-errors -o "$out" "$url"
+            if file "$out" | grep -qiE "HTML|ASCII text"; then
+              echo "::error::Google Drive returned HTML/text instead of binary for $out"
+              head -c 500 "$out"
+              exit 1
+            fi
+            ls -lh "$out"
+          }
+
+          gdrive_dl "$GDRIVE_U1_OPENSOURCE_ID" "$WORK_DIR/SM-A146U1_15_Opensource.zip"
+          gdrive_dl "$GDRIVE_A146P_DTS_ID" "$WORK_DIR/SM-A146P_15_Opensource_dts.zip"
+          gdrive_dl "$GDRIVE_BOOT_LZ4_ID" "$WORK_DIR/stock/boot.img.lz4"
+          gdrive_dl "$GDRIVE_VBMETA_LZ4_ID" "$WORK_DIR/stock/vbmeta.img.lz4"
+
+          echo "Extracting SM-A146U1_15_Opensource.zip (Binary L base)..."
+          mkdir -p "$WORK_DIR/binL_zip" "$WORK_DIR/binL"
+          unzip -q -o "$WORK_DIR/SM-A146U1_15_Opensource.zip" Kernel.tar.gz -d "$WORK_DIR/binL_zip"
+          rm -f "$WORK_DIR/SM-A146U1_15_Opensource.zip"
+          tar -xzf "$WORK_DIR/binL_zip/Kernel.tar.gz" -C "$WORK_DIR/binL"
+          rm -rf "$WORK_DIR/binL_zip"
+
+          chmod -R u+w "$WORK_DIR/binL"
+
+          echo "Extracting SM-A146P_15_Opensource_dts.zip (A146PXXULEZJ3 overlay)..."
+          mkdir -p "$WORK_DIR/dts_zip"
+          unzip -q -o "$WORK_DIR/SM-A146P_15_Opensource_dts.zip" A146PXXULEZJ3_kernel.tar.gz -d "$WORK_DIR/dts_zip"
+          rm -f "$WORK_DIR/SM-A146P_15_Opensource_dts.zip"
+          tar -xzf "$WORK_DIR/dts_zip/A146PXXULEZJ3_kernel.tar.gz" --strip-components=1 -C "$WORK_DIR/binL"
+          rm -rf "$WORK_DIR/dts_zip"
+
+          chmod -R u+w "$WORK_DIR/binL"
+
+          echo "Overlaying Binary L 6.6.127 trees onto toolchain base..."
+          for rel in \
+            "kernel-6.6" \
+            "kernel/kernel_device_modules-6.6" \
+            "kernel/configs" \
+            "kernel/vendor" \
+            "vendor"; do
+            echo "  Replacing ${rel}..."
+            rm -rf "$WORK_DIR/src/${rel}"
+            mv "$WORK_DIR/binL/${rel}" "$WORK_DIR/src/${rel}"
+          done
+
+          # Restore WildKernels QUICK_BUILD=1 support in build.sh
+          cp -f "$WORK_DIR/quick_build.sh" "$WORK_DIR/src/kernel/kernel_device_modules-6.6/build.sh"
+          chmod +x "$WORK_DIR/src/kernel/kernel_device_modules-6.6/build.sh"
+
+          # Ensure kernel/kernel-6.6 symlink points to ../kernel-6.6
+          ln -sfn ../kernel-6.6 "$WORK_DIR/src/kernel/kernel-6.6"
+
+          rm -rf "$WORK_DIR/binL" "$WORK_DIR/quick_build.sh"
+          chmod -R u+w "$WORK_DIR/src/kernel-6.6" "$WORK_DIR/src/kernel/kernel_device_modules-6.6"
+
+          echo "Verified kernel Makefile header:"
+          head -n 6 "$WORK_DIR/src/kernel-6.6/Makefile"
+          df -h
+
+      - name: Clone patch dependencies & fetch magiskboot
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/WildKernels/kernel_patches.git "$WORK_DIR/kernel_patches"
+          git clone --depth 1 -b gki-2.0 --single-branch https://github.com/WildKernels/AnyKernel3.git "$WORK_DIR/AnyKernel3"
+
+          echo "Downloading static magiskboot-x86_64 from WildKernels/magiskboot..."
+          curl -fSL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$WORK_DIR/magiskboot" \
+            "https://github.com/WildKernels/magiskboot/releases/download/nightly/magiskboot-x86_64"
+          chmod +x "$WORK_DIR/magiskboot"
+          file "$WORK_DIR/magiskboot"
+
+      - name: Apply Full WildKernels patches & configs
+        env:
+          KERNEL_ROOT: ${{ env.WORK_DIR }}/src
+          KERNEL_PATCHES: ${{ env.WORK_DIR }}/kernel_patches
+          SUSFS_DIR: ${{ env.WORK_DIR }}/susfs4ksu
+          META_ENV_FILE: ${{ env.GITHUB_ENV }}
+        run: |
+          chmod +x scripts/patch_kernel.sh
+          ./scripts/patch_kernel.sh
+
+      - name: Build kernel (QUICK_BUILD=1 / Kleaf Bazel)
+        run: |
+          set -euo pipefail
+          cd "$WORK_DIR/src"
+          export QUICK_BUILD=1
+          export BUILD_NUMBER="${BUILD_NUMBER}"
+          export SOURCE_DATE_EPOCH="$(date +%s)"
+          chmod +x build_kernel.sh kernel/kernel_device_modules-6.6/build.sh
+          bash -e ./build_kernel.sh
+
+      - name: Locate & verify built kernel Image + IKCONFIG + uname
+        run: |
+          set -euo pipefail
+          IMAGE_PATH=$(find "$WORK_DIR/src/out" -type f -path '*mgk_64_k66_kernel_aarch64.user*/Image' | head -n 1 || true)
+          IMAGE_GZ_PATH=$(find "$WORK_DIR/src/out" -type f -path '*mgk_64_k66_kernel_aarch64.user*/Image.gz' | head -n 1 || true)
+
+          if [ -z "$IMAGE_PATH" ] && [ -f "$WORK_DIR/src/kernel/bazel-bin/kernel_device_modules-6.6/mgk_64_k66_kernel_aarch64.user/Image" ]; then
+            IMAGE_PATH="$(readlink -f "$WORK_DIR/src/kernel/bazel-bin/kernel_device_modules-6.6/mgk_64_k66_kernel_aarch64.user/Image")"
+          fi
+          if [ -z "$IMAGE_GZ_PATH" ] && [ -f "$WORK_DIR/src/kernel/bazel-bin/kernel_device_modules-6.6/mgk_64_k66_kernel_aarch64.user/Image.gz" ]; then
+            IMAGE_GZ_PATH="$(readlink -f "$WORK_DIR/src/kernel/bazel-bin/kernel_device_modules-6.6/mgk_64_k66_kernel_aarch64.user/Image.gz")"
+          fi
+
+          if [ -z "$IMAGE_PATH" ] || [ ! -f "$IMAGE_PATH" ]; then
+            echo "::error::Built kernel Image not found!"
+            find "$WORK_DIR/src/out" -maxdepth 6 -name 'Image*' 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Found Image:    $IMAGE_PATH ($(stat -c%s "$IMAGE_PATH") bytes)"
+          echo "Found Image.gz: ${IMAGE_GZ_PATH:-<will compress>}"
+          echo "KERNEL_IMAGE=$IMAGE_PATH" >> "$GITHUB_ENV"
+          if [ -n "$IMAGE_GZ_PATH" ] && [ -f "$IMAGE_GZ_PATH" ]; then
+            echo "KERNEL_IMAGE_GZ=$IMAGE_GZ_PATH" >> "$GITHUB_ENV"
+          fi
+
+          BANNER=$(strings "$IMAGE_PATH" | grep -E '^Linux version 6\.6\.' | head -n 1 || true)
+          echo "Kernel Banner: $BANNER"
+          echo "KERNEL_BANNER=$BANNER" >> "$GITHUB_ENV"
+
+          if [ -z "$BANNER" ]; then
+            echo "::error::Could not extract Linux version banner from Image!"
+            exit 1
+          fi
+          if echo "$BANNER" | grep -qE -- '-dirty|-Wild'; then
+            echo "::error::Unexpected suffix (-dirty or -Wild) found in kernel banner: $BANNER"
+            exit 1
+          fi
+          if ! echo "$BANNER" | grep -q "6.6.127-android15-8-ab${BUILD_NUMBER}"; then
+            echo "::warning::Kernel banner does not match expected '6.6.127-android15-8-ab${BUILD_NUMBER}': $BANNER"
+          fi
+
+          IKCONFIG="$WORK_DIR/ikconfig.txt"
+          "$WORK_DIR/src/kernel-6.6/scripts/extract-ikconfig" "$IMAGE_PATH" > "$IKCONFIG"
+
+          echo "=== Key IKCONFIG Verification ==="
+          grep -E '^(CONFIG_(KSU|KSU_SUSFS|BBG|NOMOUNT|NTSYNC|TCP_CONG_BBR3|NET_SCH_CAKE|NET_SCH_PIE|IP_SET|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|IP_NF_TARGET_TTL|SYSVIPC|LTO_NONE|SECURITY_DEFEX|LSM|OVERLAY_FS|KALLSYMS)|# CONFIG_SECURITY_DEFEX)' "$IKCONFIG" || true
+
+          # Strict assertions on critical configs
+          for required in \
+            "CONFIG_KSU=y" \
+            "CONFIG_KSU_SUSFS=y" \
+            "CONFIG_BBG=y" \
+            "CONFIG_NOMOUNT=y" \
+            "CONFIG_NTSYNC=y" \
+            "CONFIG_TCP_CONG_BBR3=y" \
+            "CONFIG_NET_SCH_CAKE=y" \
+            "CONFIG_NET_SCH_PIE=y" \
+            "CONFIG_IP_SET=y" \
+            "CONFIG_IP6_NF_NAT=y" \
+            "CONFIG_IP6_NF_TARGET_MASQUERADE=y" \
+            "CONFIG_IP_NF_TARGET_TTL=y" \
+            "CONFIG_SYSVIPC=y" \
+            "CONFIG_LTO_NONE=y"; do
+            if ! grep -qx "$required" "$IKCONFIG"; then
+              echo "::error::Required config missing in built kernel IKCONFIG: $required"
+              exit 1
+            fi
+          done
+
+          if grep -qE '^CONFIG_SECURITY_DEFEX(=y|_USER=y)' "$IKCONFIG"; then
+            echo "::error::CONFIG_SECURITY_DEFEX is still enabled in built kernel!"
+            exit 1
+          fi
+
+          if ! grep -qE '^CONFIG_LSM=.*baseband_guard' "$IKCONFIG"; then
+            echo "::error::baseband_guard missing from CONFIG_LSM in built kernel!"
+            exit 1
+          fi
+
+          echo "All IKCONFIG and uname assertions passed!"
+
+      - name: Repack Odin tars & AnyKernel3.zip
+        env:
+          STOCK_BOOT_LZ4: ${{ env.WORK_DIR }}/stock/boot.img.lz4
+          STOCK_VBMETA_LZ4: ${{ env.WORK_DIR }}/stock/vbmeta.img.lz4
+          MAGISKBOOT: ${{ env.WORK_DIR }}/magiskboot
+          ANYKERNEL3_DIR: ${{ env.WORK_DIR }}/AnyKernel3
+        run: |
+          chmod +x scripts/repack_odin.sh
+          ./scripts/repack_odin.sh
+
+      - name: Generate build summary
+        run: |
+          cat <<EOF > "$OUT_DIR/build_summary.md"
+          # SM-A146P Custom Kernel (Binary L — ${BUILD_NUMBER})
+
+          - **Device:** Samsung Galaxy A14 5G (\`SM-A146P\`, MediaTek Dimensity 700 / \`mt6833\`)
+          - **Firmware:** One UI 7 / Android 15 — Binary L (\`${BUILD_NUMBER}\`)
+          - **Kernel Banner:** \`${KERNEL_BANNER}\`
+          - **LTO:** Default (\`CONFIG_LTO_NONE=y\`)
+
+          ## Features
+          - **KernelSU-Next** \`${KSU_GIT_TAG:-v3.4.2}\` (version \`${KSU_VERSION:-unknown}\`, \`pershoot/KernelSU-Next@dev-susfs\` \`${KSU_COMMIT:-unknown}\`)
+          - **SUSFS v2.4.0** (\`simonpunk/susfs4ksu@gki-android15-6.6\` \`${SUSFS_BASE_COMMIT:-unknown}\` + top 2 commits from \`pershoot/susfs4ksu@gki-android14-6.1-dev\`: \`${SUSFS_PERSHOOT_COMMITS:-unknown}\`)
+          - **Baseband-guard (BBG)** (\`${BBG_COMMIT:-unknown}\`)
+          - **NoMount** (\`${NOMOUNT_COMMIT:-unknown}\`)
+          - **Networking:** TCP BBRv3 + CAKE/PIE qdisc, IP-Set, IPv6 NAT + MASQUERADE, TTL/HL target
+          - **Compatibility & Security:** NTSync, Droidspaces, Unicode bypass fix, Samsung DEFEX disabled
+          - **Optimizations:** All 23 WildKernels kernel optimization patches
+
+          ## Output Files
+          | File | Usage |
+          |------|-------|
+          | \`boot_and_vbmeta.tar\` | **Odin AP** — First-time flash (\`boot.img\` + patched \`vbmeta.img\` flags=3) |
+          | \`boot.tar\` | **Odin AP** — Subsequent kernel-only updates |
+          | \`vbmeta_disabled.tar\` | **Odin AP** — Stock \`vbmeta.img\` patched with AVB flags=3 (offset 120) |
+          | \`AnyKernel3.zip\` | Custom recovery backup flasher (WildKernels/AnyKernel3 \`gki-2.0\`) |
+
+          ## SHA-256 Checksums
+          \`\`\`
+          $(cat "$OUT_DIR/SHA256SUMS.txt")
+          \`\`\`
+          EOF
+          cat "$OUT_DIR/build_summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SM-A146P-${{ env.BUILD_NUMBER }}-6.6.127-KernelSU-SUSFS
+          path: |
+            ${{ env.OUT_DIR }}/boot_and_vbmeta.tar
+            ${{ env.OUT_DIR }}/boot.tar
+            ${{ env.OUT_DIR }}/vbmeta_disabled.tar
+            ${{ env.OUT_DIR }}/AnyKernel3.zip
+            ${{ env.OUT_DIR }}/SHA256SUMS.txt
+            ${{ env.OUT_DIR }}/build_summary.md
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload patch rejects on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-rejects-${{ github.run_id }}
+          path: ${{ env.WORK_DIR }}/src/kernel-6.6/**/*.rej
+          if-no-files-found: ignore
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release != false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${BUILD_NUMBER}-6.6.127-$(date -u +%Y%m%d)-r${GITHUB_RUN_NUMBER}"
+          fi
+          TITLE="SM-A146P ${BUILD_NUMBER} (6.6.127) — KernelSU-Next + SUSFS"
+
+          EXTRA_FLAGS=()
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            EXTRA_FLAGS+=(--prerelease)
+          fi
+
+          gh release create "$TAG" \
+            "$OUT_DIR/boot_and_vbmeta.tar" \
+            "$OUT_DIR/boot.tar" \
+            "$OUT_DIR/vbmeta_disabled.tar" \
+            "$OUT_DIR/AnyKernel3.zip" \
+            "$OUT_DIR/SHA256SUMS.txt" \
+            --title "$TITLE" \
+            --notes-file "$OUT_DIR/build_summary.md" \
+            "${EXTRA_FLAGS[@]}"
