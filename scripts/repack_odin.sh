@@ -68,7 +68,7 @@ echo "Verifying repacked boot.img..."
   cd "$VERIFY_DIR"
   "$MAGISKBOOT" unpack "$STAGE_DIR/boot.img"
   echo "Kernel banner inside repacked boot.img:"
-  strings kernel | grep -E "Linux version 6\.6" | head -n 3
+  strings kernel | grep -m 2 -E "^Linux version 6\.6" || true
 )
 
 # ------------------------------------------------------------------------------

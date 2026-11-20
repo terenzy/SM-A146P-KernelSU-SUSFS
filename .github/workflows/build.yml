@@ -262,6 +262,10 @@ jobs:
           grep -E '^(CONFIG_(KSU|KSU_SUSFS|BBG|NOMOUNT|NTSYNC|TCP_CONG_BBR3|NET_SCH_CAKE|NET_SCH_PIE|IP_SET|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|IP_NF_TARGET_TTL|SYSVIPC|LTO_NONE|SECURITY_DEFEX|LSM|OVERLAY_FS|KALLSYMS)|# CONFIG_SECURITY_DEFEX)' "$IKCONFIG" || true
 
           # Strict assertions on critical configs
+          # Note: IPv6_NAT_FIX.patch intentionally rewrites CONFIG_IP6_NF_NAT=y -> =n
+          # inside config_data.gz (IKCONFIG) for Android VTS compatibility while
+          # keeping IPv6 NAT compiled in (proven by CONFIG_IP6_NF_TARGET_MASQUERADE=y
+          # which depends on IP6_NF_NAT).
           for required in \
             "CONFIG_KSU=y" \
             "CONFIG_KSU_SUSFS=y" \
@@ -272,7 +276,7 @@ jobs:
             "CONFIG_NET_SCH_CAKE=y" \
             "CONFIG_NET_SCH_PIE=y" \
             "CONFIG_IP_SET=y" \
-            "CONFIG_IP6_NF_NAT=y" \
+            "CONFIG_IP6_NF_NAT=n" \
             "CONFIG_IP6_NF_TARGET_MASQUERADE=y" \
             "CONFIG_IP_NF_TARGET_TTL=y" \
             "CONFIG_SYSVIPC=y" \
@@ -386,4 +390,4 @@ jobs:
             "$OUT_DIR/SHA256SUMS.txt" \
             --title "$TITLE" \
             --notes-file "$OUT_DIR/build_summary.md" \
-            "${EXTRA_FLAGS[@]}"
+            ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}
