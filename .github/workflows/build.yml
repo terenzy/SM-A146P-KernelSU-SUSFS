@@ -197,10 +197,9 @@ jobs:
           KERNEL_ROOT: ${{ env.WORK_DIR }}/src
           KERNEL_PATCHES: ${{ env.WORK_DIR }}/kernel_patches
           SUSFS_DIR: ${{ env.WORK_DIR }}/susfs4ksu
-          META_ENV_FILE: ${{ env.GITHUB_ENV }}
         run: |
           chmod +x scripts/patch_kernel.sh
-          ./scripts/patch_kernel.sh
+          META_ENV_FILE="$GITHUB_ENV" ./scripts/patch_kernel.sh
 
       - name: Build kernel (QUICK_BUILD=1 / Kleaf Bazel)
         run: |
