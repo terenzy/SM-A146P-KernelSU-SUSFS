@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Free disk space
         uses: endersonmenezes/free-disk-space@v3
@@ -330,7 +330,7 @@ jobs:
           cat "$OUT_DIR/build_summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: SM-A146P-${{ env.BUILD_NUMBER }}-6.6.127-KernelSU-SUSFS
           path: |
@@ -345,7 +345,7 @@ jobs:
 
       - name: Upload patch rejects on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: patch-rejects-${{ github.run_id }}
           path: ${{ env.WORK_DIR }}/src/kernel-6.6/**/*.rej

@@ -85,9 +85,12 @@ assert anchor in text, "Anchor '#include <linux/security.h>' not found in fs/nam
 if anchor + block in text:
     print("fs/namespace.c already has CONFIG_PROC_STLOG block after linux/security.h")
 elif block in text:
-    # Remove old location (including one extra trailing newline if present)
-    if "\n" + block in text:
-        text = text.replace("\n" + block, "\n", 1)
+    # Remove old location along with its trailing blank line so exactly one
+    # blank line remains between <trace/hooks/fs.h> and sysctl_mount_max.
+    if block + "\n" in text:
+        text = text.replace(block + "\n", "", 1)
+    elif "\n" + block in text:
+        text = text.replace("\n" + block, "", 1)
     else:
         text = text.replace(block, "", 1)
     text = text.replace(anchor, anchor + block, 1)
