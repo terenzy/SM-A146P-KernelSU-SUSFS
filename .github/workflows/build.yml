@@ -90,6 +90,9 @@ jobs:
           set -euo pipefail
           git clone --depth 1 -b "$TOOLCHAIN_BRANCH" --single-branch \
             "https://github.com/${TOOLCHAIN_REPO}.git" "$WORK_DIR/src"
+          # Remove toolchain repo .git so Kleaf workspace_status_stamp.py never
+          # injects WildKernels commit hash (-g...) or -dirty into kernel uname.
+          rm -rf "$WORK_DIR/src/.git"
 
           echo "Extracting compressed toolchain archives (*.tar.xz)..."
           cd "$WORK_DIR/src"
@@ -155,6 +158,12 @@ jobs:
             rm -rf "$WORK_DIR/src/${rel}"
             mv "$WORK_DIR/binL/${rel}" "$WORK_DIR/src/${rel}"
           done
+
+          # Overlay Binary L mgk.bzl so sign.config (# CONFIG_MODULE_SIG_ALL is not set)
+          # is applied to mgk_64_k66_kernel_aarch64.user (matches stock IKCONFIG and
+          # prevents sign-file error on missing mtk_signing_key.pem inside sandbox)
+          cp -f "$WORK_DIR/binL/kernel/build/bazel_mgk_rules/mgk.bzl" \
+            "$WORK_DIR/src/kernel/build/bazel_mgk_rules/mgk.bzl"
 
           # Restore WildKernels QUICK_BUILD=1 support in build.sh
           cp -f "$WORK_DIR/quick_build.sh" "$WORK_DIR/src/kernel/kernel_device_modules-6.6/build.sh"
@@ -237,12 +246,13 @@ jobs:
             echo "::error::Could not extract Linux version banner from Image!"
             exit 1
           fi
-          if echo "$BANNER" | grep -qE -- '-dirty|-Wild'; then
-            echo "::error::Unexpected suffix (-dirty or -Wild) found in kernel banner: $BANNER"
+          if echo "$BANNER" | grep -qE -- '-dirty|-Wild|-g[0-9a-f]{7,}'; then
+            echo "::error::Unexpected suffix (-dirty, -Wild, or -g<hash>) found in kernel banner: $BANNER"
             exit 1
           fi
-          if ! echo "$BANNER" | grep -q "6.6.127-android15-8-ab${BUILD_NUMBER}"; then
-            echo "::warning::Kernel banner does not match expected '6.6.127-android15-8-ab${BUILD_NUMBER}': $BANNER"
+          if ! echo "$BANNER" | grep -q "6.6.127-android15-8-ab${BUILD_NUMBER}-4k"; then
+            echo "::error::Kernel banner does not match expected '6.6.127-android15-8-ab${BUILD_NUMBER}-4k': $BANNER"
+            exit 1
           fi
 
           IKCONFIG="$WORK_DIR/ikconfig.txt"
