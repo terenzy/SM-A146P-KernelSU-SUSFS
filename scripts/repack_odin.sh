@@ -139,10 +139,38 @@ rm -f "$OUT_DIR/AnyKernel3.zip"
   zip -r -9 "$OUT_DIR/AnyKernel3.zip" .
 )
 
+# ------------------------------------------------------------------------------
+# 6. Pack a146p_stealth_companion.zip (KernelSU Companion Module + ksu_susfs)
+# ------------------------------------------------------------------------------
+COMPANION_DIR="${COMPANION_DIR:-}"
+KSU_SUSFS_BIN="${KSU_SUSFS_BIN:-}"
+CHECKSUM_FILES=(boot_and_vbmeta.tar boot.tar vbmeta_disabled.tar AnyKernel3.zip)
+
+if [ -n "$COMPANION_DIR" ] && [ -d "$COMPANION_DIR" ]; then
+  echo ">>> [6/6] Building a146p_stealth_companion.zip..."
+  COMP_WORK="$WORK_DIR/companion"
+  cp -a "$COMPANION_DIR" "$COMP_WORK"
+  mkdir -p "$COMP_WORK/bin"
+  if [ -n "$KSU_SUSFS_BIN" ] && [ -f "$KSU_SUSFS_BIN" ]; then
+    cp -f "$KSU_SUSFS_BIN" "$COMP_WORK/bin/ksu_susfs"
+    chmod 0755 "$COMP_WORK/bin/ksu_susfs"
+  else
+    echo "ERROR: KSU_SUSFS_BIN must point to ksu_susfs_arm64 binary when COMPANION_DIR is set" >&2
+    exit 1
+  fi
+  chmod 0755 "$COMP_WORK/customize.sh" "$COMP_WORK/service.sh" "$COMP_WORK/action.sh" "$COMP_WORK/uninstall.sh" "$COMP_WORK/bin/stealth_sync.sh"
+  rm -f "$OUT_DIR/a146p_stealth_companion.zip"
+  (
+    cd "$COMP_WORK"
+    zip -r -9 "$OUT_DIR/a146p_stealth_companion.zip" .
+  )
+  CHECKSUM_FILES+=(a146p_stealth_companion.zip)
+fi
+
 # Generate checksums
 (
   cd "$OUT_DIR"
-  sha256sum boot_and_vbmeta.tar boot.tar vbmeta_disabled.tar AnyKernel3.zip > SHA256SUMS.txt
+  sha256sum "${CHECKSUM_FILES[@]}" > SHA256SUMS.txt
 )
 
 echo "============================================================"

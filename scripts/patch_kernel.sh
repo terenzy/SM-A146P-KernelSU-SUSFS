@@ -356,15 +356,14 @@ apply_patch "$KERNEL_PATCHES/common/silence_system_logspam.patch"
 apply_patch "$KERNEL_PATCHES/common/use_unlikely_wrap_cpufreq.patch"
 
 # ------------------------------------------------------------------------------
-# 12. Mountify, Kallsyms/KPM, Samsung DEFEX Disable, ABI exports, check_defconfig
+# 12. Mountify, Kallsyms, Samsung DEFEX Disable, ABI exports, check_defconfig
 # ------------------------------------------------------------------------------
-echo ">>> [12/13] Configuring Mountify, Kallsyms, Samsung DEFEX disable, ABI exports..."
+echo ">>> [12/14] Configuring Mountify, Kallsyms, Samsung DEFEX disable, ABI exports..."
 "$CONFIG_TOOL" --file "$GKI_DEFCONFIG" --enable CONFIG_OVERLAY_FS
 "$CONFIG_TOOL" --file "$GKI_DEFCONFIG" --enable CONFIG_TMPFS_XATTR
 "$CONFIG_TOOL" --file "$GKI_DEFCONFIG" --enable CONFIG_TMPFS_POSIX_ACL
 "$CONFIG_TOOL" --file "$GKI_DEFCONFIG" --enable CONFIG_KALLSYMS
 "$CONFIG_TOOL" --file "$GKI_DEFCONFIG" --enable CONFIG_KALLSYMS_ALL
-"$CONFIG_TOOL" --file "$GKI_DEFCONFIG" --enable CONFIG_KPM
 
 # Disable Samsung DEFEX in mediatek-bazel_defconfig (stock Binary L does not use KDP)
 "$CONFIG_TOOL" --file "$MTK_DEFCONFIG" --disable CONFIG_SECURITY_DEFEX
@@ -380,8 +379,16 @@ perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_ex
 # ------------------------------------------------------------------------------
 # 13. Clean Stock-like Kernel Name (NO -Wild, NO -dirty) & Default LTO
 # ------------------------------------------------------------------------------
-echo ">>> [13/13] Cleaning -dirty from scripts/setlocalversion (keeping stock uname & default LTO)..."
+echo ">>> [13/14] Cleaning -dirty from scripts/setlocalversion (keeping stock uname & default LTO)..."
 sed -i 's/-dirty//' "$COMMON/scripts/setlocalversion"
+
+# ------------------------------------------------------------------------------
+# 14. Zero-Leak Kernel Stealth Layers (1-7)
+# ------------------------------------------------------------------------------
+echo ">>> [14/14] Applying Zero-Leak Kernel Stealth Layers (apply_stealth.sh)..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+chmod +x "$SCRIPT_DIR/apply_stealth.sh"
+KERNEL_ROOT="$KERNEL_ROOT" REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)" "$SCRIPT_DIR/apply_stealth.sh"
 
 # Verify zero patch rejects across the entire source tree
 mapfile -t REJS < <(find "$COMMON" -type f -name '*.rej')
@@ -395,5 +402,5 @@ if [ "${#REJS[@]}" -gt 0 ]; then
 fi
 
 echo "============================================================"
-echo " All patches and configs applied cleanly with 0 rejects!"
+echo " All patches, configs, and stealth layers applied cleanly (0 rejects)!"
 echo "============================================================"

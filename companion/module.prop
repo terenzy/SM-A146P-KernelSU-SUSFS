@@ -1,0 +1,6 @@
+id=a146p_stealth_companion
+name=SM-A146P Stealth Companion
+version=v1.0.0
+versionCode=100
+author=terenzy
+description=Auto-activates SUSFS v2.4.0 stealth (AVC spoof, mount hide, priority UID filter synced from HMA-OSS) & NoMount isolation. Tap Action for live audit.

@@ -179,7 +179,7 @@ jobs:
           head -n 6 "$WORK_DIR/src/kernel-6.6/Makefile"
           df -h
 
-      - name: Clone patch dependencies & fetch magiskboot
+      - name: Clone patch dependencies, fetch magiskboot & ksu_susfs, extract stock identity
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/WildKernels/kernel_patches.git "$WORK_DIR/kernel_patches"
@@ -192,13 +192,37 @@ jobs:
           chmod +x "$WORK_DIR/magiskboot"
           file "$WORK_DIR/magiskboot"
 
-      - name: Apply Full WildKernels patches & configs
+          echo "Downloading ksu_susfs_arm64 (v2.4.0+ universal binary) from sidex15/susfs4ksu-binaries..."
+          curl -fSL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$WORK_DIR/ksu_susfs_arm64" \
+            "https://raw.githubusercontent.com/sidex15/susfs4ksu-binaries/universal-binary/ksu_susfs_arm64"
+          chmod +x "$WORK_DIR/ksu_susfs_arm64"
+          file "$WORK_DIR/ksu_susfs_arm64" | tee /dev/stderr | grep -qi "ARM aarch64"
+
+          echo "Extracting authentic stock Samsung kernel banner from stock boot.img.lz4..."
+          STOCK_INSPECT="$(mktemp -d)"
+          trap 'rm -rf "$STOCK_INSPECT"' EXIT
+          unlz4 -f "$WORK_DIR/stock/boot.img.lz4" "$STOCK_INSPECT/stock_boot.img"
+          (
+            cd "$STOCK_INSPECT"
+            "$WORK_DIR/magiskboot" unpack stock_boot.img >/dev/null
+          )
+          STOCK_BANNER="$(strings "$STOCK_INSPECT/kernel" | grep -E '^Linux version 6\.6\.' | awk '{ if (length($0) > max) { max = length($0); best = $0 } } END { print best }')"
+          if [ -z "$STOCK_BANNER" ]; then
+            echo "::error::Failed to extract stock kernel banner from stock boot.img.lz4"
+            exit 1
+          fi
+          echo "Stock Samsung Banner: $STOCK_BANNER"
+          echo "STOCK_KERNEL_BANNER=$STOCK_BANNER" >> "$GITHUB_ENV"
+
+      - name: Apply Full WildKernels patches, configs & Zero-Leak Stealth Layers
         env:
           KERNEL_ROOT: ${{ env.WORK_DIR }}/src
           KERNEL_PATCHES: ${{ env.WORK_DIR }}/kernel_patches
           SUSFS_DIR: ${{ env.WORK_DIR }}/susfs4ksu
+          STOCK_KERNEL_BANNER: ${{ env.STOCK_KERNEL_BANNER }}
         run: |
-          chmod +x scripts/patch_kernel.sh
+          chmod +x scripts/patch_kernel.sh scripts/apply_stealth.sh
           META_ENV_FILE="$GITHUB_ENV" ./scripts/patch_kernel.sh
 
       - name: Build kernel (QUICK_BUILD=1 / Kleaf Bazel)
@@ -211,7 +235,7 @@ jobs:
           chmod +x build_kernel.sh kernel/kernel_device_modules-6.6/build.sh
           bash -e ./build_kernel.sh
 
-      - name: Locate & verify built kernel Image + IKCONFIG + uname
+      - name: Locate & verify built kernel Image, real .config, scrubbed IKCONFIG, uname & binary strings
         run: |
           set -euo pipefail
           IMAGE_PATH=$(find "$WORK_DIR/src/out" -type f -path '*mgk_64_k66_kernel_aarch64.user*/Image' | head -n 1 || true)
@@ -237,8 +261,10 @@ jobs:
             echo "KERNEL_IMAGE_GZ=$IMAGE_GZ_PATH" >> "$GITHUB_ENV"
           fi
 
-          BANNER=$(strings "$IMAGE_PATH" | grep -E '^Linux version 6\.6\.' | head -n 1 || true)
-          echo "Kernel Banner: $BANNER"
+          # Pick the full version-timestamp banner (longest ^Linux version 6.6. line)
+          BANNER=$(strings "$IMAGE_PATH" | grep -E '^Linux version 6\.6\.' | awk '{ if (length($0) > max) { max = length($0); best = $0 } } END { print best }')
+          echo "Built Kernel Banner: $BANNER"
+          echo "Stock Kernel Banner: ${STOCK_KERNEL_BANNER}"
           echo "KERNEL_BANNER=$BANNER" >> "$GITHUB_ENV"
 
           if [ -z "$BANNER" ]; then
@@ -254,20 +280,38 @@ jobs:
             exit 1
           fi
 
-          IKCONFIG="$WORK_DIR/ikconfig.txt"
-          "$WORK_DIR/src/kernel-6.6/scripts/extract-ikconfig" "$IMAGE_PATH" > "$IKCONFIG"
+          # Verify built banner matches exact stock user@host and stock UTS_VERSION timestamp
+          BUILT_BANNER="$BANNER" STOCK_BANNER="$STOCK_KERNEL_BANNER" python3 - <<'PY'
+          import os, re
+          built = os.environ["BUILT_BANNER"].strip()
+          stock = os.environ["STOCK_BANNER"].strip()
+          pat = r"^Linux version\s+\S+\s+\(([^@)\s]+@[^)\s]+)\)\s+\(.*\)\s+(#\d+\s+SMP(?:\s+.+)?)$"
+          mb = re.match(pat, built)
+          ms = re.match(pat, stock)
+          assert mb and ms, f"Banner parse failed:\n  built={built}\n  stock={stock}"
+          assert mb.group(1) == ms.group(1), f"Build user@host mismatch: built={mb.group(1)} != stock={ms.group(1)}"
+          assert mb.group(2) == ms.group(2)[:64].rstrip(), f"UTS_VERSION mismatch: built={mb.group(2)!r} != stock={ms.group(2)[:64].rstrip()!r}"
+          print(f"Verified exact stock identity match: ({mb.group(1)}) {mb.group(2)}")
+          PY
 
-          echo "=== Key IKCONFIG Verification ==="
-          grep -E '^(CONFIG_(KSU|KSU_SUSFS|BBG|NOMOUNT|NTSYNC|TCP_CONG_BBR3|NET_SCH_CAKE|NET_SCH_PIE|IP_SET|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|IP_NF_TARGET_TTL|SYSVIPC|LTO_NONE|SECURITY_DEFEX|LSM|OVERLAY_FS|KALLSYMS)|# CONFIG_SECURITY_DEFEX)' "$IKCONFIG" || true
+          # 1. Verify REAL compiled .config (before config_data scrubbing)
+          REAL_CONFIG=$(find "$WORK_DIR/src/out" -type f -path '*mgk_64_k66_kernel_aarch64.user*' -name '.config' | head -n 1 || true)
+          if [ -z "$REAL_CONFIG" ]; then
+            REAL_CONFIG=$(find "$WORK_DIR/src/kernel/bazel-bin" -L -type f -name '.config' 2>/dev/null | head -n 1 || true)
+          fi
+          if [ -z "$REAL_CONFIG" ] || [ ! -f "$REAL_CONFIG" ]; then
+            echo "::error::Could not locate real compiled .config for verification!"
+            find "$WORK_DIR/src/out" -name '.config' 2>/dev/null | head -n 20 || true
+            exit 1
+          fi
+          echo "=== Real Compiled .config Verification ($REAL_CONFIG) ==="
+          grep -E '^(CONFIG_(KSU|KSU_SUSFS|BBG|NOMOUNT|NTSYNC|TCP_CONG_BBR3|NET_SCH_CAKE|NET_SCH_PIE|IP_SET|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE|IP_NF_TARGET_TTL|SYSVIPC|LTO_NONE|SECURITY_DEFEX|SECURITY_DMESG_RESTRICT|LSM|OVERLAY_FS|KALLSYMS)|# CONFIG_(SECURITY_DEFEX|KSU_SUSFS_ENABLE_LOG))' "$REAL_CONFIG" || true
 
-          # Strict assertions on critical configs
-          # Note: IPv6_NAT_FIX.patch intentionally rewrites CONFIG_IP6_NF_NAT=y -> =n
-          # inside config_data.gz (IKCONFIG) for Android VTS compatibility while
-          # keeping IPv6 NAT compiled in (proven by CONFIG_IP6_NF_TARGET_MASQUERADE=y
-          # which depends on IP6_NF_NAT).
           for required in \
             "CONFIG_KSU=y" \
             "CONFIG_KSU_SUSFS=y" \
+            "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y" \
+            "# CONFIG_KSU_SUSFS_ENABLE_LOG is not set" \
             "CONFIG_BBG=y" \
             "CONFIG_NOMOUNT=y" \
             "CONFIG_NTSYNC=y" \
@@ -275,35 +319,79 @@ jobs:
             "CONFIG_NET_SCH_CAKE=y" \
             "CONFIG_NET_SCH_PIE=y" \
             "CONFIG_IP_SET=y" \
-            "CONFIG_IP6_NF_NAT=n" \
+            "CONFIG_IP6_NF_NAT=y" \
             "CONFIG_IP6_NF_TARGET_MASQUERADE=y" \
             "CONFIG_IP_NF_TARGET_TTL=y" \
             "CONFIG_SYSVIPC=y" \
-            "CONFIG_LTO_NONE=y"; do
-            if ! grep -qx "$required" "$IKCONFIG"; then
-              echo "::error::Required config missing in built kernel IKCONFIG: $required"
+            "CONFIG_LTO_NONE=y" \
+            "CONFIG_SECURITY_DMESG_RESTRICT=y"; do
+            if ! grep -qx "$required" "$REAL_CONFIG"; then
+              echo "::error::Required config missing in real compiled .config: $required"
               exit 1
             fi
           done
 
-          if grep -qE '^CONFIG_SECURITY_DEFEX(=y|_USER=y)' "$IKCONFIG"; then
-            echo "::error::CONFIG_SECURITY_DEFEX is still enabled in built kernel!"
+          if grep -qE '^CONFIG_SECURITY_DEFEX(=y|_USER=y)' "$REAL_CONFIG"; then
+            echo "::error::CONFIG_SECURITY_DEFEX is still enabled in real compiled .config!"
+            exit 1
+          fi
+          if ! grep -qE '^CONFIG_LSM=.*baseband_guard' "$REAL_CONFIG"; then
+            echo "::error::baseband_guard missing from CONFIG_LSM in real compiled .config!"
             exit 1
           fi
 
-          if ! grep -qE '^CONFIG_LSM=.*baseband_guard' "$IKCONFIG"; then
-            echo "::error::baseband_guard missing from CONFIG_LSM in built kernel!"
-            exit 1
+          # 2. Verify System.map proves all subsystems are linked into vmlinux
+          SYSTEM_MAP="$(dirname "$IMAGE_PATH")/System.map"
+          if [ ! -f "$SYSTEM_MAP" ]; then
+            SYSTEM_MAP="$(readlink -f "$WORK_DIR/src/kernel/bazel-bin/kernel_device_modules-6.6/mgk_64_k66_kernel_aarch64.user/System.map" 2>/dev/null || true)"
+          fi
+          if [ -f "$SYSTEM_MAP" ]; then
+            echo "=== Linked Subsystem Symbols Verification ($SYSTEM_MAP) ==="
+            for sym in susfs_is_priority_uid_filtered __ksu_is_allow_uid nomount_init bbg_init; do
+              if ! grep -qE " ${sym}$" "$SYSTEM_MAP"; then
+                echo "::error::Expected linked symbol '${sym}' missing from System.map!"
+                exit 1
+              fi
+              echo "  [OK] linked symbol: $sym"
+            done
           fi
 
-          echo "All IKCONFIG and uname assertions passed!"
+          # 3. Verify /proc/config.gz (IKCONFIG inside Image) is 100% SCRUBBED
+          IKCONFIG="$WORK_DIR/ikconfig.txt"
+          "$WORK_DIR/src/kernel-6.6/scripts/extract-ikconfig" "$IMAGE_PATH" > "$IKCONFIG"
+          echo "=== Scrubbed /proc/config.gz (IKCONFIG) Stealth Verification ==="
+          if grep -nE 'CONFIG_(KSU|SUSFS|NOMOUNT|BBG|KPM)|baseband_guard' "$IKCONFIG"; then
+            echo "::error::Unscrubbed stealth markers found inside /proc/config.gz (IKCONFIG)!"
+            exit 1
+          fi
+          for expected_scrub in \
+            "CONFIG_IP6_NF_NAT=n" \
+            "CONFIG_SECURITY_DEFEX=y" \
+            "CONFIG_SECURITY_DEFEX_USER=y"; do
+            if ! grep -qx "$expected_scrub" "$IKCONFIG"; then
+              echo "::error::Expected stock-like scrubbed line missing in IKCONFIG: $expected_scrub"
+              exit 1
+            fi
+          done
+          echo "  [OK] /proc/config.gz is 100% scrubbed (0 KSU/SUSFS/NoMount/BBG/KPM leaks)"
 
-      - name: Repack Odin tars & AnyKernel3.zip
+          # 4. Verify compiled Image binary has 0 Telegram / NoMount / BBG banner strings
+          echo "=== Kernel Image Binary String Hygiene Verification ==="
+          if strings "$IMAGE_PATH" | grep -iE 'qdykernel|t\.me/|NoMount: |baseband_guard: deny'; then
+            echo "::error::Identifiable banner/log strings leaked into compiled kernel Image!"
+            exit 1
+          fi
+          echo "  [OK] 0 identifiable Telegram/NoMount/BBG strings in kernel Image"
+          echo "All real .config, System.map, scrubbed IKCONFIG, binary hygiene, and stock uname assertions passed!"
+
+      - name: Repack Odin tars, AnyKernel3.zip & Stealth Companion module
         env:
           STOCK_BOOT_LZ4: ${{ env.WORK_DIR }}/stock/boot.img.lz4
           STOCK_VBMETA_LZ4: ${{ env.WORK_DIR }}/stock/vbmeta.img.lz4
           MAGISKBOOT: ${{ env.WORK_DIR }}/magiskboot
           ANYKERNEL3_DIR: ${{ env.WORK_DIR }}/AnyKernel3
+          COMPANION_DIR: ${{ github.workspace }}/companion
+          KSU_SUSFS_BIN: ${{ env.WORK_DIR }}/ksu_susfs_arm64
         run: |
           chmod +x scripts/repack_odin.sh
           ./scripts/repack_odin.sh
@@ -311,29 +399,32 @@ jobs:
       - name: Generate build summary
         run: |
           cat <<EOF > "$OUT_DIR/build_summary.md"
-          # SM-A146P Custom Kernel (Binary L — ${BUILD_NUMBER})
+          # SM-A146P Custom Kernel — Full-Stack Zero-Leak Stealth (Binary L — ${BUILD_NUMBER})
 
           - **Device:** Samsung Galaxy A14 5G (\`SM-A146P\`, MediaTek Dimensity 700 / \`mt6833\`)
           - **Firmware:** One UI 7 / Android 15 — Binary L (\`${BUILD_NUMBER}\`)
-          - **Kernel Banner:** \`${KERNEL_BANNER}\`
+          - **Kernel Banner:** \`${KERNEL_BANNER}\` (exact stock Samsung user@host & timestamp)
           - **LTO:** Default (\`CONFIG_LTO_NONE=y\`)
 
-          ## Features
+          ## Root & Zero-Leak Stealth Features
           - **KernelSU-Next** \`${KSU_GIT_TAG:-v3.4.2}\` (version \`${KSU_VERSION:-unknown}\`, \`pershoot/KernelSU-Next@dev-susfs\` \`${KSU_COMMIT:-unknown}\`)
-          - **SUSFS v2.4.0** (\`simonpunk/susfs4ksu@gki-android15-6.6\` \`${SUSFS_BASE_COMMIT:-unknown}\` + top 2 commits from \`pershoot/susfs4ksu@gki-android14-6.1-dev\`: \`${SUSFS_PERSHOOT_COMMITS:-unknown}\`)
-          - **Baseband-guard (BBG)** (\`${BBG_COMMIT:-unknown}\`)
-          - **NoMount** (\`${NOMOUNT_COMMIT:-unknown}\`)
-          - **Networking:** TCP BBRv3 + CAKE/PIE qdisc, IP-Set, IPv6 NAT + MASQUERADE, TTL/HL target
-          - **Compatibility & Security:** NTSync, Droidspaces, Unicode bypass fix, Samsung DEFEX disabled
-          - **Optimizations:** All 23 WildKernels kernel optimization patches
+          - **SUSFS v2.4.0** (\`simonpunk/susfs4ksu@gki-android15-6.6\` \`${SUSFS_BASE_COMMIT:-unknown}\` + pershoot fixes) with \`CONFIG_KSU_SUSFS_ENABLE_LOG=n\`
+          - **Surgical \`PRIORITY_UID_FILTER\`** — RCU-safe kernel auto-hiding of KSU Manager & allowlist UIDs + self-UID guard + dynamic HMA-OSS bitmap sync across \`getpriority\`/\`setpriority\`/\`ioprio_get\`/\`ioprio_set\`
+          - **NoMount Cloaking** (\`${NOMOUNT_COMMIT:-unknown}\`) — closed \`add_key("nomount")\`/\`request_key\` oracle (\`-ENODEV\` for non-\`CAP_SYS_ADMIN\`), silenced \`dmesg\`/modinfo, hidden in \`/proc/kallsyms\`
+          - **Baseband-guard Cloaking** (\`${BBG_COMMIT:-unknown}\`) — active block-partition protection, stripped Telegram/Chinese strings, hidden from \`/sys/kernel/security/lsm\`, boot log, and \`/proc/kallsyms\`
+          - **Scrubbed \`/proc/config.gz\` (IKCONFIG)** — 0 \`KSU\`/\`SUSFS\`/\`NOMOUNT\`/\`BBG\`/\`baseband_guard\` leaks, stock-like \`DEFEX\` & \`IP6_NF_NAT=n\` display
+          - **Non-Root \`/proc/cmdline\` & \`/proc/bootconfig\` Sanitization** — zero-allocation streaming sanitization (\`green\`/\`locked\`/\`warranty_bit=0\`) for app UIDs (\`>= 10000\`) while preserving SUSFS overrides
+          - **Hardening & CVEs:** \`CONFIG_SECURITY_DMESG_RESTRICT=y\`, Unicode bypass fix (\`CVE-2024-43093\`), 2026 kernel CVE checks (\`CVE-2026-43499\`, \`CVE-2026-64560\`, \`CVE-2026-98260\`)
+          - **Networking & Optimizations:** TCP BBRv3 + CAKE/PIE qdisc, IP-Set, IPv6 NAT + MASQUERADE, TTL/HL, NTSync, Droidspaces, all 23 WildKernels optimizations
 
           ## Output Files
           | File | Usage |
           |------|-------|
           | \`boot_and_vbmeta.tar\` | **Odin AP** — First-time flash (\`boot.img\` + patched \`vbmeta.img\` flags=3) |
-          | \`boot.tar\` | **Odin AP** — Subsequent kernel-only updates |
+          | \`boot.tar\` | **Odin AP** — Subsequent kernel-only updates (no data wipe) |
           | \`vbmeta_disabled.tar\` | **Odin AP** — Stock \`vbmeta.img\` patched with AVB flags=3 (offset 120) |
-          | \`AnyKernel3.zip\` | Custom recovery backup flasher (WildKernels/AnyKernel3 \`gki-2.0\`) |
+          | \`AnyKernel3.zip\` | Custom recovery flasher (WildKernels/AnyKernel3 \`gki-2.0\`) |
+          | \`a146p_stealth_companion.zip\` | **KernelSU Module** — Auto-activates SUSFS v2.4.0 (AVC spoof, mount hide, \`sus_path\`), real-time HMA-OSS → SUSFS \`priority_uid_filter\` + NoMount UID isolation sync, and **Action** live self-audit |
 
           ## SHA-256 Checksums
           \`\`\`
@@ -345,12 +436,13 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: SM-A146P-${{ env.BUILD_NUMBER }}-6.6.127-KernelSU-SUSFS
+          name: SM-A146P-${{ env.BUILD_NUMBER }}-6.6.127-KernelSU-SUSFS-Stealth
           path: |
             ${{ env.OUT_DIR }}/boot_and_vbmeta.tar
             ${{ env.OUT_DIR }}/boot.tar
             ${{ env.OUT_DIR }}/vbmeta_disabled.tar
             ${{ env.OUT_DIR }}/AnyKernel3.zip
+            ${{ env.OUT_DIR }}/a146p_stealth_companion.zip
             ${{ env.OUT_DIR }}/SHA256SUMS.txt
             ${{ env.OUT_DIR }}/build_summary.md
           retention-days: 30
@@ -372,9 +464,9 @@ jobs:
           set -euo pipefail
           TAG="${{ inputs.release_tag }}"
           if [ -z "$TAG" ]; then
-            TAG="${BUILD_NUMBER}-6.6.127-$(date -u +%Y%m%d)-r${GITHUB_RUN_NUMBER}"
+            TAG="${BUILD_NUMBER}-6.6.127-stealth-$(date -u +%Y%m%d)-r${GITHUB_RUN_NUMBER}"
           fi
-          TITLE="SM-A146P ${BUILD_NUMBER} (6.6.127) — KernelSU-Next + SUSFS"
+          TITLE="SM-A146P ${BUILD_NUMBER} (6.6.127) — KernelSU-Next + Zero-Leak Stealth"
 
           EXTRA_FLAGS=()
           if [ "${{ inputs.prerelease }}" = "true" ]; then
@@ -386,6 +478,7 @@ jobs:
             "$OUT_DIR/boot.tar" \
             "$OUT_DIR/vbmeta_disabled.tar" \
             "$OUT_DIR/AnyKernel3.zip" \
+            "$OUT_DIR/a146p_stealth_companion.zip" \
             "$OUT_DIR/SHA256SUMS.txt" \
             --title "$TITLE" \
             --notes-file "$OUT_DIR/build_summary.md" \
