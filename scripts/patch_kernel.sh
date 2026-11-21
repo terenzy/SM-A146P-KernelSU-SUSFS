@@ -8,6 +8,9 @@
 # ==============================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 KERNEL_ROOT="${KERNEL_ROOT:?KERNEL_ROOT must be set (path to combined toolchain + Binary L tree)}"
 KERNEL_PATCHES="${KERNEL_PATCHES:?KERNEL_PATCHES must be set (path to WildKernels/kernel_patches)}"
 SUSFS_DIR="${SUSFS_DIR:-$(dirname "$KERNEL_ROOT")/susfs4ksu}"
@@ -386,9 +389,8 @@ sed -i 's/-dirty//' "$COMMON/scripts/setlocalversion"
 # 14. Zero-Leak Kernel Stealth Layers (1-7)
 # ------------------------------------------------------------------------------
 echo ">>> [14/14] Applying Zero-Leak Kernel Stealth Layers (apply_stealth.sh)..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chmod +x "$SCRIPT_DIR/apply_stealth.sh"
-KERNEL_ROOT="$KERNEL_ROOT" REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)" "$SCRIPT_DIR/apply_stealth.sh"
+KERNEL_ROOT="$KERNEL_ROOT" REPO_ROOT="$REPO_ROOT" "$SCRIPT_DIR/apply_stealth.sh"
 
 # Verify zero patch rejects across the entire source tree
 mapfile -t REJS < <(find "$COMMON" -type f -name '*.rej')

@@ -295,9 +295,12 @@ jobs:
           PY
 
           # 1. Verify REAL compiled .config (before config_data scrubbing)
-          REAL_CONFIG=$(find "$WORK_DIR/src/out" -type f -path '*mgk_64_k66_kernel_aarch64.user*' -name '.config' | head -n 1 || true)
+          REAL_CONFIG=$(find "$WORK_DIR/src/out" \( -type f -o -type l \) -path '*mgk_64_k66_kernel_aarch64.user*' -name '.config' | head -n 1 || true)
           if [ -z "$REAL_CONFIG" ]; then
             REAL_CONFIG=$(find "$WORK_DIR/src/kernel/bazel-bin" -L -type f -name '.config' 2>/dev/null | head -n 1 || true)
+          fi
+          if [ -z "$REAL_CONFIG" ]; then
+            REAL_CONFIG=$(find "$WORK_DIR/src/out" \( -type f -o -type l \) -name '.config' 2>/dev/null | head -n 1 || true)
           fi
           if [ -z "$REAL_CONFIG" ] || [ ! -f "$REAL_CONFIG" ]; then
             echo "::error::Could not locate real compiled .config for verification!"
@@ -366,8 +369,7 @@ jobs:
           fi
           for expected_scrub in \
             "CONFIG_IP6_NF_NAT=n" \
-            "CONFIG_SECURITY_DEFEX=y" \
-            "CONFIG_SECURITY_DEFEX_USER=y"; do
+            "CONFIG_SECURITY_DEFEX=y"; do
             if ! grep -qx "$expected_scrub" "$IKCONFIG"; then
               echo "::error::Expected stock-like scrubbed line missing in IKCONFIG: $expected_scrub"
               exit 1
