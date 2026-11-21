@@ -47,13 +47,33 @@ echo "============================================================"
 # ------------------------------------------------------------------------------
 # Layer 1: Surgical PRIORITY_UID_FILTER in fs/susfs.c (RCU-safe)
 # ------------------------------------------------------------------------------
-echo ">>> [Stealth 1/7] Enhancing SUSFS PRIORITY_UID_FILTER (KSU auto-hide + self-UID guard)..."
+echo ">>> [Stealth 1/7] Enhancing SUSFS PRIORITY_UID_FILTER (KSU auto-hide + self-UID guard + log-off stubs)..."
 python3 - <<'PY'
 from pathlib import Path
+import re
 
 p = Path("fs/susfs.c")
 text = p.read_text()
 
+# 1a. Fix upstream SUSFS v2.4.0 missing #else stubs for SUSFS_LOGI_RL / SUSFS_LOGE_RL
+# when CONFIG_KSU_SUSFS_ENABLE_LOG is disabled.
+m = re.search(
+    r"(#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG\b.*?#else\b)(.*?)(#endif)",
+    text,
+    flags=re.DOTALL,
+)
+assert m, "CONFIG_KSU_SUSFS_ENABLE_LOG #ifdef/#else/#endif block not found in fs/susfs.c"
+else_body = m.group(2)
+stubs = ""
+if "SUSFS_LOGI_RL" not in else_body:
+    stubs += "#define SUSFS_LOGI_RL(fmt, ...) do { } while (0)\n"
+if "SUSFS_LOGE_RL" not in else_body:
+    stubs += "#define SUSFS_LOGE_RL(fmt, ...) do { } while (0)\n"
+if stubs:
+    text = text[: m.start(3)] + stubs + text[m.start(3) :]
+    print("Patched fs/susfs.c: added missing SUSFS_LOGI_RL / SUSFS_LOGE_RL #else no-op stubs")
+
+# 1b. Surgical PRIORITY_UID_FILTER enhancement (RCU-safe)
 sig = "bool susfs_is_priority_uid_filtered(uid_t uid) {"
 assert sig in text, "susfs_is_priority_uid_filtered not found in fs/susfs.c"
 
@@ -88,10 +108,11 @@ inject = (
 
 if "Never hide caller's own UID" not in text:
     text = text.replace(anchor, inject, 1)
-    p.write_text(text)
     print("Patched fs/susfs.c: surgical PRIORITY_UID_FILTER enhancement applied")
 else:
     print("fs/susfs.c: surgical PRIORITY_UID_FILTER enhancement already present")
+
+p.write_text(text)
 PY
 
 # ------------------------------------------------------------------------------
